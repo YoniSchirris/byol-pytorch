@@ -7,7 +7,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from kornia import augmentation as augs
-from kornia import filters
+from kornia import filters, color
 
 # helper functions
 
@@ -36,7 +36,7 @@ def singleton(cache_key):
 def loss_fn(x, y):
     x = F.normalize(x, dim=-1, p=2)
     y = F.normalize(y, dim=-1, p=2)
-    return -2 * (x * y).sum(dim=-1)
+    return 2 - 2 * (x * y).sum(dim=-1)
 
 # augmentation utils
 
@@ -97,7 +97,7 @@ class NetWrapper(nn.Module):
         self.projection_hidden_size = projection_hidden_size
 
         self.hidden = None
-        self._register_hook()
+        self.hook_registered = False
 
     def _find_layer(self):
         if type(self.layer) == str:
@@ -115,6 +115,7 @@ class NetWrapper(nn.Module):
         layer = self._find_layer()
         assert layer is not None, f'hidden layer ({self.layer}) not found'
         handle = layer.register_forward_hook(self._hook)
+        self.hook_registered = True
 
     @singleton('projector')
     def _get_projector(self, hidden):
@@ -123,6 +124,9 @@ class NetWrapper(nn.Module):
         return projector.to(hidden)
 
     def get_representation(self, x):
+        if not self.hook_registered:
+            self._register_hook()
+
         if self.layer == -1:
             return self.net(x)
 
@@ -151,7 +155,8 @@ class BYOL(nn.Module):
             augs.RandomGrayscale(p=0.2),
             augs.RandomHorizontalFlip(),
             RandomApply(filters.GaussianBlur2d((3, 3), (1.5, 1.5)), p=0.1),
-            augs.RandomResizedCrop((image_size, image_size))
+            augs.RandomResizedCrop((image_size, image_size)),
+            color.Normalize(mean=torch.tensor([0.485, 0.456, 0.406]), std=torch.tensor([0.229, 0.224, 0.225]))
         )
 
         self.augment = default(augment_fn, DEFAULT_AUG)
@@ -168,7 +173,6 @@ class BYOL(nn.Module):
     @singleton('target_encoder')
     def _get_target_encoder(self):
         target_encoder = copy.deepcopy(self.online_encoder)
-        target_encoder._register_hook()
         return target_encoder
 
     def reset_moving_average(self):
@@ -197,4 +201,4 @@ class BYOL(nn.Module):
         loss_two = loss_fn(online_pred_two, target_proj_one.detach())
 
         loss = loss_one + loss_two
-        return loss.sum()
+        return loss.mean()
